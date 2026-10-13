@@ -466,3 +466,91 @@ async fn test_fetch_not_found_is_negatively_cached() {
   }
   assert_eq!(request_count.load(Ordering::SeqCst), 3);
 }
+
+#[tokio::test]
+async fn test_authenticated_fetch_retries_cached_not_found() {
+  use std::sync::atomic::AtomicUsize;
+  use std::sync::atomic::Ordering;
+
+  use deno_cache_dir::memory::MemoryHttpCache;
+
+  #[derive(Debug, Clone, Default)]
+  struct TestHttpClient {
+    #[allow(clippy::disallowed_types, reason = "arc wrapper type")]
+    request_count: deno_maybe_sync::MaybeArc<AtomicUsize>,
+  }
+
+  #[async_trait::async_trait(?Send)]
+  impl HttpClient for TestHttpClient {
+    async fn send_no_follow(
+      &self,
+      _url: &Url,
+      headers: HeaderMap,
+    ) -> Result<SendResponse, SendError> {
+      self.request_count.fetch_add(1, Ordering::SeqCst);
+      if headers.get(http::header::AUTHORIZATION).is_some() {
+        let mut header_map = HeaderMap::new();
+        header_map
+          .insert("content-type", "application/typescript".parse().unwrap());
+        Ok(SendResponse::Success(header_map, b"export {};\n".to_vec()))
+      } else {
+        Err(SendError::NotFound)
+      }
+    }
+  }
+
+  let sys = InMemorySys::default();
+  let http_cache = new_rc(MemoryHttpCache::new(sys.clone()));
+  let client = TestHttpClient::default();
+  let request_count = client.request_count.clone();
+  let url = Url::parse("https://localhost/private.ts").unwrap();
+
+  // Simulate a process that previously requested the private module without
+  // credentials and persisted the resulting 404.
+  let unauthenticated_fetcher = FileFetcher::new(
+    NullBlobStore,
+    sys.clone(),
+    http_cache.clone(),
+    client.clone(),
+    new_rc(NullMemoryFiles),
+    FileFetcherOptions {
+      allow_remote: true,
+      cache_setting: CacheSetting::Use,
+      auth_tokens: AuthTokens::new(None),
+    },
+  );
+  match unauthenticated_fetcher
+    .fetch_no_follow(&url, FetchNoFollowOptions::default())
+    .await
+    .unwrap_err()
+    .into_kind()
+  {
+    FetchNoFollowErrorKind::NotFound(_) => {}
+    err => unreachable!("{err:?}"),
+  }
+  assert_eq!(request_count.load(Ordering::SeqCst), 1);
+
+  // A later process has credentials. Its request must reach the server rather
+  // than being rejected by the unauthenticated process's cached 404.
+  let authenticated_fetcher = FileFetcher::new(
+    NullBlobStore,
+    sys,
+    http_cache,
+    client,
+    new_rc(NullMemoryFiles),
+    FileFetcherOptions {
+      allow_remote: true,
+      cache_setting: CacheSetting::Use,
+      auth_tokens: AuthTokens::new(Some("secret@localhost".to_string())),
+    },
+  );
+  let FileOrRedirect::File(file) = authenticated_fetcher
+    .fetch_no_follow(&url, FetchNoFollowOptions::default())
+    .await
+    .unwrap()
+  else {
+    unreachable!();
+  };
+  assert_eq!(&*file.source, b"export {};\n");
+  assert_eq!(request_count.load(Ordering::SeqCst), 2);
+}
