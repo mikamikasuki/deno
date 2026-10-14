@@ -364,14 +364,23 @@ function opFetchSend(rid) {
  * @returns {ReadableStream<Uint8Array>}
  */
 function createResponseBodyStream(responseBodyRid, terminator) {
-  const readable = readableStreamForRid(responseBodyRid);
+  const readable = readableStreamForRid(
+    responseBodyRid,
+    true,
+    undefined,
+    undefined,
+    cleanup,
+  );
+
+  function cleanup() {
+    terminator[abortSignal.remove](onAbort);
+  }
 
   function onAbort() {
     errorReadableStream(readable, terminator.reason);
     core.tryClose(responseBodyRid);
   }
 
-  // TODO(lucacasonato): clean up registration
   terminator[abortSignal.add](onAbort);
 
   return readable;

@@ -49,6 +49,26 @@ const signal = Symbol("[[signal]]");
 const timerId = Symbol("[[timerId]]");
 const activeDependents = Symbol("[[activeDependents]]");
 
+function addActiveDependentReference(signal) {
+  if (signal[sourceSignals] === null) return;
+  for (const weakRef of new SafeSetIterator(signal[sourceSignals])) {
+    const sourceSignal = WeakRefPrototypeDeref(weakRef);
+    if (sourceSignal === undefined) continue;
+    sourceSignal[activeDependents] ??= new SafeSet();
+    SetPrototypeAdd(sourceSignal[activeDependents], signal);
+  }
+}
+
+function removeActiveDependentReference(signal) {
+  if (signal[sourceSignals] === null) return;
+  for (const weakRef of new SafeSetIterator(signal[sourceSignals])) {
+    const sourceSignal = WeakRefPrototypeDeref(weakRef);
+    if (sourceSignal?.[activeDependents] !== undefined) {
+      SetPrototypeDelete(sourceSignal[activeDependents], signal);
+    }
+  }
+}
+
 const illegalConstructorKey = Symbol("illegalConstructorKey");
 
 // When a dependent signal created by AbortSignal.any() is GC'd, clean up
@@ -155,6 +175,9 @@ class AbortSignal extends EventTarget {
     }
     this[abortAlgos] ??= new SafeSet();
     SetPrototypeAdd(this[abortAlgos], algorithm);
+    // Keep dependent signals alive while internal algorithms are waiting for
+    // an upstream abort, just as addEventListener does for public listeners.
+    addActiveDependentReference(this);
   }
 
   [signalAbort](
@@ -205,19 +228,17 @@ class AbortSignal extends EventTarget {
       super.dispatchEvent(event);
     }
 
-    // release strong references from source signals now that abort has been delivered
-    if (this[sourceSignals] !== null) {
-      for (const weakRef of new SafeSetIterator(this[sourceSignals])) {
-        const sourceSignal = WeakRefPrototypeDeref(weakRef);
-        if (sourceSignal !== undefined && sourceSignal[activeDependents]) {
-          SetPrototypeDelete(sourceSignal[activeDependents], this);
-        }
-      }
-    }
+    // Release strong references from source signals after abort delivery.
+    removeActiveDependentReference(this);
   }
 
   [remove](algorithm) {
     this[abortAlgos] && SetPrototypeDelete(this[abortAlgos], algorithm);
+    if (
+      this[abortAlgos]?.size === 0 && listenerCount(this, "abort") === 0
+    ) {
+      removeActiveDependentReference(this);
+    }
   }
 
   constructor(key = null) {
@@ -286,7 +307,10 @@ class AbortSignal extends EventTarget {
           if (sourceSignal === undefined) continue;
           // Release the strong backref that addEventListener installed; the
           // dependent is now free to be GC'd if nothing else holds it.
-          if (sourceSignal[activeDependents]) {
+          if (
+            sourceSignal[activeDependents] &&
+            (this[abortAlgos] === null || this[abortAlgos].size === 0)
+          ) {
             SetPrototypeDelete(sourceSignal[activeDependents], this);
           }
           if (sourceSignal[timerId] !== null) {

@@ -1,0 +1,5 @@
+{
+  "args": "run --v8-flags=--expose-gc --allow-net fetch_abort_response_gc.js",
+  "output": "fetch_abort_response_gc.js.out",
+  "exitCode": 0
+}
