@@ -2973,6 +2973,20 @@ function readableByteStreamControllerConvertPullIntoDescriptor(
   // deno-lint-ignore deno-internal/prefer-primordials
   assert(bytesFilled <= pullIntoDescriptor.byteLength);
   assert((bytesFilled % elementSize) === 0);
+  // Default-reader pull-into descriptors use autoAllocateChunkSize. When a
+  // source responds with fewer bytes than that allocation, shrink the backing
+  // buffer before exposing the chunk so a small view does not retain the
+  // entire auto-allocated buffer.
+  if (
+    pullIntoDescriptor.readerType === "default" &&
+    bytesFilled < pullIntoDescriptor.bufferByteLength
+  ) {
+    pullIntoDescriptor.buffer = ArrayBufferPrototypeTransferToFixedLength(
+      // deno-lint-ignore deno-internal/prefer-primordials
+      pullIntoDescriptor.buffer,
+      bytesFilled,
+    );
+  }
   const buffer = ArrayBufferPrototypeTransferToFixedLength(
     // deno-lint-ignore deno-internal/prefer-primordials
     pullIntoDescriptor.buffer,

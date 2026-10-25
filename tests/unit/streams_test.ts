@@ -198,6 +198,30 @@ Deno.test(async function readableStream() {
   core.close(rid);
 });
 
+// A short default-reader chunk must not retain the full auto-allocated buffer.
+Deno.test(
+  async function readableByteStreamDefaultReaderShrinksAutoAllocatedBuffer() {
+    const stream = new ReadableStream({
+      type: "bytes",
+      autoAllocateChunkSize: 64 * 1024,
+      pull(controller) {
+        const request = controller.byobRequest!;
+        new Uint8Array(request.view!.buffer, request.view!.byteOffset, 5).set([
+          1,
+          2,
+          3,
+          4,
+          5,
+        ]);
+        request.respond(5);
+      },
+    });
+    const { value } = await stream.getReader().read();
+    assertEquals(value, new Uint8Array([1, 2, 3, 4, 5]));
+    assertEquals(value!.buffer.byteLength, 5);
+  },
+);
+
 // Close the stream after reading everything
 Deno.test(async function readableStreamClose() {
   const cancel = Promise.withResolvers();
